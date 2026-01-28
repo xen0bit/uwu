@@ -1,9 +1,11 @@
 """Main CLI entry point for OpenWebUI RAG upload tool."""
 
+import tempfile
 import time
 import zipfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import click
 import requests
@@ -116,6 +118,81 @@ class OpenWebUIClient:
         return response.json()
 
 
+def download_zip_from_url(url: str) -> tuple[Path, str]:
+    """
+    Download a zip file from a URL and return the temporary file path and name.
+    
+    Returns:
+        tuple: (temp_file_path, name) where name is derived from the URL
+    """
+    click.echo(f"Downloading zip file from {url}...")
+    
+    # Create a session with retry strategy
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
+    try:
+        response = session.get(url, stream=True, timeout=60)
+        response.raise_for_status()
+        
+        # Extract filename from URL or Content-Disposition header
+        name = "downloaded"
+        if "Content-Disposition" in response.headers:
+            content_disposition = response.headers["Content-Disposition"]
+            if "filename=" in content_disposition:
+                name = content_disposition.split("filename=")[1].strip('"\'')
+                if name.endswith(".zip"):
+                    name = name[:-4]
+        else:
+            # Try to extract from URL path
+            parsed = urlparse(url)
+            path_parts = parsed.path.strip("/").split("/")
+            if path_parts:
+                last_part = path_parts[-1]
+                if last_part.endswith(".zip"):
+                    name = last_part[:-4]
+                elif last_part:
+                    name = last_part
+        
+        # Create temporary file
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+        temp_path = Path(temp_file.name)
+        
+        # Download with progress
+        total_size = int(response.headers.get("Content-Length", 0))
+        downloaded = 0
+        chunk_count = 0
+        
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                temp_file.write(chunk)
+                downloaded += len(chunk)
+                chunk_count += 1
+                # Update progress every 100 chunks to avoid too much output
+                if total_size > 0 and chunk_count % 100 == 0:
+                    percent = (downloaded / total_size) * 100
+                    click.echo(f"  Progress: {downloaded}/{total_size} bytes ({percent:.1f}%)")
+        
+        temp_file.close()
+        if total_size > 0:
+            click.echo(f"✓ Downloaded {downloaded} bytes to temporary file")
+        else:
+            click.echo(f"✓ Downloaded to temporary file")
+        
+        return temp_path, name
+    
+    except requests.exceptions.RequestException as e:
+        click.echo(f"✗ Failed to download zip file: {e}", err=True)
+        raise click.Abort()
+
+
 @click.command()
 @click.option(
     "--host",
@@ -135,8 +212,8 @@ class OpenWebUIClient:
 @click.option(
     "--zip-file",
     required=True,
-    type=click.Path(exists=True, path_type=Path),
-    help="Path to the zip file to upload"
+    type=str,
+    help="Path to the zip file to upload, or URL to download zip from"
 )
 @click.option(
     "--timeout",
@@ -150,11 +227,25 @@ class OpenWebUIClient:
     type=int,
     help="Polling interval in seconds for checking file status (default: 2)"
 )
-def cli(host: str, bearer_token: str, cookie: Optional[str], zip_file: Path, timeout: int, poll_interval: int):
+def cli(host: str, bearer_token: str, cookie: Optional[str], zip_file: str, timeout: int, poll_interval: int):
     """Upload contents of a zip file to OpenWebUI RAG endpoint."""
     
-    # Extract name and description from zip filename
-    zip_name = zip_file.stem  # filename without extension
+    # Check if zip_file is a URL or local path
+    is_url = zip_file.startswith(("http://", "https://"))
+    temp_zip_file: Optional[Path] = None
+    
+    if is_url:
+        # Download the zip file
+        temp_zip_file, zip_name = download_zip_from_url(zip_file)
+        zip_file_path = temp_zip_file
+    else:
+        # Use local file
+        zip_file_path = Path(zip_file)
+        if not zip_file_path.exists():
+            click.echo(f"✗ File not found: {zip_file}", err=True)
+            raise click.Abort()
+        zip_name = zip_file_path.stem  # filename without extension
+    
     name = zip_name
     description = zip_name
     
@@ -174,14 +265,14 @@ def cli(host: str, bearer_token: str, cookie: Optional[str], zip_file: Path, tim
         raise click.Abort()
     
     # Step 2: Extract files from zip and upload all files
-    click.echo(f"\nExtracting files from {zip_file}...")
+    click.echo(f"\nExtracting files from {zip_file_path}...")
     file_info_list = []  # List of (file_path, extracted_path) tuples
     uploaded_files = []  # List of (file_path, file_id) tuples
     
     import tempfile
     
     try:
-        with zipfile.ZipFile(zip_file, "r") as zip_ref:
+        with zipfile.ZipFile(zip_file_path, "r") as zip_ref:
             file_list = [f for f in zip_ref.namelist() if not f.endswith("/")]
             click.echo(f"Found {len(file_list)} file(s) in archive")
             
@@ -213,7 +304,7 @@ def cli(host: str, bearer_token: str, cookie: Optional[str], zip_file: Path, tim
                         continue
     
     except zipfile.BadZipFile:
-        click.echo(f"✗ Invalid zip file: {zip_file}", err=True)
+        click.echo(f"✗ Invalid zip file: {zip_file_path}", err=True)
         raise click.Abort()
     except Exception as e:
         click.echo(f"✗ Error processing zip file: {e}", err=True)
@@ -277,6 +368,14 @@ def cli(host: str, bearer_token: str, cookie: Optional[str], zip_file: Path, tim
         click.echo(f"\n  Failed files:")
         for file_path, file_id, error in failed_files:
             click.echo(f"    - {file_path} (ID: {file_id}): {error}")
+    
+    # Clean up temporary downloaded file if it exists
+    if temp_zip_file and temp_zip_file.exists():
+        try:
+            temp_zip_file.unlink()
+            click.echo(f"\nCleaned up temporary downloaded file")
+        except Exception:
+            pass  # Ignore cleanup errors
 
 
 if __name__ == "__main__":
