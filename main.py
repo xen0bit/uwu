@@ -1,6 +1,6 @@
-def main():
-    print("Hello from uwu!")
+"""Entry point for the uwu CLI tool."""
 
+from uwu.main import cli
 
 if __name__ == "__main__":
-    main()
+    cli()
