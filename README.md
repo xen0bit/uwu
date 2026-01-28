@@ -1,5 +1,7 @@
 # uwu
 
+`uvx --from git+https://github.com/xen0bit/uwu uwu --help`
+
 A CLI tool to upload zip files to OpenWebUI's RAG (Retrieval Augmented Generation) endpoint. Automatically extracts files from zip archives, uploads them to OpenWebUI, waits for processing, and adds them to a knowledge collection.
 
 ## Features
