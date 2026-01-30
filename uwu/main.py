@@ -1,10 +1,8 @@
 """Main CLI entry point for OpenWebUI RAG upload tool."""
 
 import tempfile
-import threading
 import time
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -229,13 +227,7 @@ def download_zip_from_url(url: str) -> tuple[Path, str]:
     type=int,
     help="Polling interval in seconds for checking file status (default: 2)"
 )
-@click.option(
-    "--concurrency",
-    default=5,
-    type=int,
-    help="Number of concurrent file uploads (default: 5)"
-)
-def cli(host: str, bearer_token: str, cookie: Optional[str], zip_file: str, timeout: int, poll_interval: int, concurrency: int):
+def cli(host: str, bearer_token: str, cookie: Optional[str], zip_file: str, timeout: int, poll_interval: int):
     """Upload contents of a zip file to OpenWebUI RAG endpoint."""
     
     # Check if zip_file is a URL or local path
@@ -277,6 +269,8 @@ def cli(host: str, bearer_token: str, cookie: Optional[str], zip_file: str, time
     file_info_list = []  # List of (file_path, extracted_path) tuples
     uploaded_files = []  # List of (file_path, file_id) tuples
     
+    import tempfile
+    
     try:
         with zipfile.ZipFile(zip_file_path, "r") as zip_ref:
             file_list = [f for f in zip_ref.namelist() if not f.endswith("/")]
@@ -295,36 +289,19 @@ def cli(host: str, bearer_token: str, cookie: Optional[str], zip_file: str, time
                     
                     file_info_list.append((file_path, extracted_path))
                 
-                # Step 3: Upload all files concurrently
-                click.echo(f"\nUploading {len(file_info_list)} file(s) (concurrency: {concurrency})...")
+                # Step 3: Upload all files
+                click.echo(f"\nUploading {len(file_info_list)} file(s)...")
                 
-                def upload_one(item: tuple[str, Path]) -> tuple[str, Optional[str], Optional[str]]:
-                    """Upload a single file. Returns (file_path, file_id, error)."""
-                    file_path, extracted_path = item
-                    # Each thread gets its own client (requests.Session is not thread-safe)
-                    worker_client = OpenWebUIClient(host, bearer_token, cookie)
+                for idx, (file_path, extracted_path) in enumerate(file_info_list, 1):
+                    click.echo(f"[{idx}/{len(file_info_list)}] Uploading: {file_path}")
                     try:
-                        file_data = worker_client.upload_file(extracted_path)
-                        return (file_path, file_data["id"], None)
+                        file_data = client.upload_file(extracted_path)
+                        file_id = file_data["id"]
+                        click.echo(f"  ✓ Uploaded with ID: {file_id}")
+                        uploaded_files.append((file_path, file_id))
                     except Exception as e:
-                        return (file_path, None, str(e))
-                
-                progress_lock = threading.Lock()
-                completed_count = [0]  # list so it's mutable in closure
-                
-                with ThreadPoolExecutor(max_workers=concurrency) as executor:
-                    futures = {executor.submit(upload_one, item): item for item in file_info_list}
-                    for future in as_completed(futures):
-                        file_path, file_id, error = future.result()
-                        with progress_lock:
-                            completed_count[0] += 1
-                            idx = completed_count[0]
-                            total = len(file_info_list)
-                        if error:
-                            click.echo(f"[{idx}/{total}] ✗ {file_path}: {error}", err=True)
-                        else:
-                            click.echo(f"[{idx}/{total}] ✓ {file_path} (ID: {file_id})")
-                            uploaded_files.append((file_path, file_id))
+                        click.echo(f"  ✗ Failed to upload {file_path}: {e}", err=True)
+                        continue
     
     except zipfile.BadZipFile:
         click.echo(f"✗ Invalid zip file: {zip_file_path}", err=True)

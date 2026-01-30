@@ -7,7 +7,6 @@ A CLI tool to upload zip files to OpenWebUI's RAG (Retrieval Augmented Generatio
 ## Features
 
 - 📦 Upload zip files from local filesystem or download from URLs
-- ⚡ Concurrent file uploads (configurable worker count)
 - 🔄 Batch processing: Upload all files, then monitor processing status
 - 🔐 Supports both Bearer token and cookie-based authentication
 - 📊 Progress tracking and detailed status reporting
@@ -76,7 +75,6 @@ uv run uwu \
 | `--zip-file` | Yes | - | Path to local zip file or URL to download zip from |
 | `--timeout` | No | 300 | Timeout in seconds for file processing |
 | `--poll-interval` | No | 2 | Polling interval in seconds for checking file status |
-| `--concurrency` | No | 5 | Number of concurrent file uploads |
 | `--help` | No | - | Show help message and exit |
 
 ## How It Works
